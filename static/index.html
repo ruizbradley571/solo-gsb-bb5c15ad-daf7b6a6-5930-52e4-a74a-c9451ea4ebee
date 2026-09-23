@@ -78,6 +78,7 @@
           </div>
           <div class="field"><label>元素 ID</label><div id="d-id" class="readonly mono small"></div></div>
           <div class="btn-row">
+            <button id="btn-cue-sheet" class="hidden">📋 场次提示单</button>
             <button id="btn-delete" class="danger">删除</button>
             <button id="btn-restore" class="hidden">恢复</button>
           </div>
@@ -95,6 +96,19 @@
   </main>
 
   <div id="toast" class="toast hidden"></div>
+</div>
+
+<!-- ===== 只读场次提示单（打印用） ===== -->
+<div id="cue-overlay" class="overlay hidden">
+  <div class="cue-paper">
+    <div id="cue-doc" class="cue-doc"></div>
+    <div class="cue-actions">
+      <select id="cue-scene-select" title="切换场次"></select>
+      <span class="divider"></span>
+      <button id="btn-cue-print" class="primary">🖨 打印</button>
+      <button id="btn-cue-close">关闭</button>
+    </div>
+  </div>
 </div>
 
 <script type="module" src="/static/app.js"></script>

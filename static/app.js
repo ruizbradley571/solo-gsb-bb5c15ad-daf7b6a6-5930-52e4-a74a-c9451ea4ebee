@@ -37,6 +37,13 @@ function parseTime(txt) {
   }
   return null;
 }
+// 提示单时长：≥1s 用秒（最多 3 位小数），否则显示毫秒
+function fmtDuration(ms) {
+  ms = Math.max(0, Math.round(ms));
+  if (ms < 1000) return `${ms} ms`;
+  const sec = ms / 1000;
+  return `${parseFloat(sec.toFixed(3))} s`;
+}
 function hashColor(str) {
   let h = 0;
   for (const ch of String(str)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -72,6 +79,7 @@ const state = {
   retryTimer: null,
   closing: false,
   selectedId: null,
+  cueSceneId: null,          // 只读场次提示单当前查看的场次（不产生任何操作）
   dragging: null,          // {id, origStart, origX, width}
   suppressDetail: false,
 };
@@ -447,6 +455,7 @@ function render() {
   renderDetail();
   renderConflicts();
   renderLog();
+  renderCue();
 }
 
 // ----------------------------------------------------------------- drag ----
@@ -524,6 +533,8 @@ function renderDetail() {
 
   $('#btn-delete').classList.toggle('hidden', !!elem.deleted);
   $('#btn-restore').classList.toggle('hidden', !elem.deleted);
+  // 提示单仅对可见场次开放（动作 / 音效 / 已删除元素无场次范围）
+  $('#btn-cue-sheet').classList.toggle('hidden', elem.kind !== 'scene' || !!elem.deleted);
   state.suppressDetail = false;
 }
 
@@ -550,6 +561,9 @@ function bindDetail() {
   });
   $('#btn-delete').addEventListener('click', () => removeElement(state.selectedId));
   $('#btn-restore').addEventListener('click', () => restoreElement(state.selectedId));
+  $('#btn-cue-sheet').addEventListener('click', () => {
+    if (state.selectedId) openCue(state.selectedId);
+  });
 }
 
 // ------------------------------------------------------------- conflicts ----
@@ -683,6 +697,116 @@ function renderLog() {
   }
 }
 
+// --------------------------------------------------- read-only cue sheet ----
+// 只读场次提示单：完全由折叠视图派生，不生成任何协作操作。
+// 复用折叠视图的规则——已删除元素与父场次被删的动作本就不在 view 中出现。
+const cueByStartKey = (a, b) => {
+  if (a.start !== b.start) return a.start - b.start;
+  for (let i = 0; i < 3; i++) {
+    if (a.createKey[i] !== b.createKey[i]) return a.createKey[i] - b.createKey[i];
+  }
+  return 0;
+};
+
+// 收集在场次半开时间区间 [scene.start, scene.end) 内「开始」的可见动作与音效。
+// 半开边界保证恰好落在下一场起点的提示只归入下一场。动作按时间而非所属场次
+// 归入（buildView 已剔除已删除动作及父场次被删的动作），故需汇总所有场次的动作。
+function cueEntries(scene) {
+  const end = scene.start + scene.duration;
+  const inRange = (e) => e.start >= scene.start && e.start < end;
+  const actions = state.view.scenes.flatMap((s) => s.actions).filter(inRange);
+  const sounds = state.view.sounds.filter(inRange);
+  // 时间线的稳定顺序：(开始时间, createKey)
+  return [...actions, ...sounds].sort(cueByStartKey);
+}
+
+function openCue(sceneId) {
+  state.cueSceneId = sceneId;
+  $('#cue-overlay').classList.remove('hidden');
+  renderCue();
+}
+function closeCue() {
+  state.cueSceneId = null;
+  $('#cue-overlay').classList.add('hidden');
+}
+
+function renderCue() {
+  const overlay = $('#cue-overlay');
+  if (overlay.classList.contains('hidden') || !state.view) return;
+  const v = state.view;
+  const sel = $('#cue-scene-select');
+
+  // 场次下拉始终可切换；已删场次不会出现在折叠视图里，失效时回退到第一场
+  sel.innerHTML = '';
+  for (const s of v.scenes) {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = `${s.name}（${fmtTime(s.start)}）`;
+    sel.appendChild(opt);
+  }
+  if (!v.scenes.some((s) => s.id === state.cueSceneId)) {
+    state.cueSceneId = v.scenes[0]?.id || null;
+  }
+  sel.value = state.cueSceneId || '';
+  sel.disabled = v.scenes.length === 0;
+  $('#btn-cue-print').disabled = !state.cueSceneId;
+
+  const doc = $('#cue-doc');
+  const scene = state.cueSceneId ? v.elements[state.cueSceneId] : null;
+  if (!scene) {
+    doc.innerHTML = '<div class="cue-empty">当前没有可生成提示单的场次（已删除场次不在此列）。</div>';
+    return;
+  }
+
+  const end = scene.start + scene.duration;
+  const entries = cueEntries(scene);
+  const rows = entries.map((e, i) => `
+    <tr>
+      <td class="cue-no">${i + 1}</td>
+      <td class="cue-rel mono">${fmtTime(e.start - scene.start)}</td>
+      <td><span class="cue-kind cue-kind-${e.kind}">${KIND_LABEL[e.kind]}</span></td>
+      <td class="cue-name">${escapeHtml(e.name)}</td>
+      <td class="cue-dur mono">${fmtDuration(e.duration)}</td>
+    </tr>`).join('');
+
+  doc.innerHTML = `
+    <div class="cue-head">
+      <h1>${escapeHtml(state.title || '未命名剧目')} · 场次提示单</h1>
+      <h2>${escapeHtml(scene.name)}</h2>
+      <p class="muted">时间范围 ${fmtTime(scene.start)} – ${fmtTime(end)}（时长 ${fmtDuration(scene.duration)}）
+        · 共 ${entries.length} 条提示</p>
+    </div>
+    <table class="cue-table">
+      <thead>
+        <tr><th>#</th><th>相对起点</th><th>类型</th><th>名称</th><th>时长</th></tr>
+      </thead>
+      <tbody>${rows || '<tr><td colspan="5" class="cue-empty">该场次时间范围内没有开始的动作或音效。</td></tr>'}</tbody>
+    </table>
+    <p class="cue-foot muted">只读视图，不产生协作操作；仅列出在本场次起点（含）至终点（不含）之间开始的可见动作与音效，
+      已删除元素及父场次被删的动作不显示。</p>`;
+}
+
+function escapeHtml(txt) {
+  return String(txt).replace(/[&<>"']/g, (ch) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+function bindCue() {
+  $('#cue-scene-select').addEventListener('change', (e) => {
+    state.cueSceneId = e.target.value || null;
+    renderCue();
+  });
+  $('#btn-cue-print').addEventListener('click', () => window.print());
+  $('#btn-cue-close').addEventListener('click', closeCue);
+  // 点击遮罩空白处或按 Esc 关闭；打印时 Esc 不影响内容
+  $('#cue-overlay').addEventListener('pointerdown', (e) => {
+    if (e.target === $('#cue-overlay')) closeCue();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('#cue-overlay').classList.contains('hidden')) closeCue();
+  });
+}
+
 // ------------------------------------------------------------------ tabs ----
 function switchTab(name) {
   for (const t of ['detail', 'conflict', 'log']) {
@@ -772,9 +896,11 @@ function enterPlay(playId, title) {
   state.queue = LS.get(queueKey(playId), []);
   state.serverVV = {};
   state.selectedId = null;
+  state.cueSceneId = null;
   location.hash = `#/play/${playId}`;
   $('#join-overlay').classList.add('hidden');
   $('#app').classList.remove('hidden');
+  $('#cue-overlay').classList.add('hidden');
   $('#play-title').textContent = title;
   ensureProfile();
   recompute();
@@ -788,6 +914,7 @@ function leavePlay() {
   if (state.ws) { try { state.ws.close(); } catch {} }
   state.connected = false;
   state.playId = null;
+  closeCue();
   $('#app').classList.add('hidden');
   $('#join-overlay').classList.remove('hidden');
   location.hash = '';
@@ -817,6 +944,7 @@ function bindChrome() {
   });
   bindTabs();
   bindDetail();
+  bindCue();
 }
 
 (async function init() {

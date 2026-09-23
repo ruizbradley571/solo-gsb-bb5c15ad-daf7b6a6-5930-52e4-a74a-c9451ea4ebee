@@ -250,3 +250,61 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
   box-shadow: 0 8px 30px rgba(0,0,0,.5);
 }
 .toast.error { border-color: var(--danger); color: #fecaca; }
+
+/* ---------- read-only scene cue sheet ---------- */
+#cue-overlay { z-index: 60; padding: 24px; overflow: auto; }
+.cue-paper {
+  width: min(820px, 100%);
+  margin: auto;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.cue-doc {
+  background: #f8fafc; color: #0f172a;
+  border-radius: 10px; padding: 34px 40px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.55);
+  font-size: 13px; line-height: 1.5;
+}
+.cue-head h1 { margin: 0 0 6px; font-size: 19px; }
+.cue-head h2 { margin: 0 0 6px; font-size: 16px; color: #1e293b; }
+.cue-head p { margin: 0 0 18px; font-size: 12px; }
+.cue-table { width: 100%; border-collapse: collapse; }
+.cue-table th, .cue-table td {
+  border: 1px solid #cbd5e1; padding: 6px 10px; text-align: left; vertical-align: top;
+}
+.cue-table thead th { background: #e2e8f0; font-size: 12px; }
+.cue-table .cue-no { width: 38px; text-align: right; color: #64748b; }
+.cue-table .cue-rel { width: 110px; white-space: nowrap; }
+.cue-table .cue-dur { width: 96px; white-space: nowrap; }
+.cue-table .cue-kind { white-space: nowrap; font-size: 11px; padding: 1px 7px; border-radius: 999px; }
+.cue-kind-action { background: #fef3c7; border: 1px solid #f59e0b; color: #92400e; }
+.cue-kind-sound { background: #ccfbf1; border: 1px solid #14b8a6; color: #115e59; }
+.cue-empty { text-align: center; color: #64748b; padding: 22px 0; }
+.cue-foot { margin: 16px 0 0; font-size: 11px; }
+.cue-actions {
+  display: flex; gap: 8px; align-items: center; justify-content: center;
+}
+.cue-actions select {
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text); border-radius: 7px; padding: 7px 10px; max-width: 320px;
+}
+.cue-actions .divider { background: var(--line); }
+
+/* ---------- print: only the cue sheet document ---------- */
+@media print {
+  body { background: #fff; }
+  /* visibility:hidden would keep boxes and push the sheet to page 2 */
+  body > *:not(#cue-overlay) { display: none !important; }
+  #cue-overlay {
+    position: static; inset: auto; padding: 0;
+    background: #fff; display: block; overflow: visible;
+  }
+  .cue-paper { width: 100%; margin: 0; display: block; }
+  .cue-doc {
+    background: #fff; color: #000; box-shadow: none; border-radius: 0;
+    padding: 0; font-size: 12pt;
+  }
+  .cue-actions { display: none; }
+  .cue-table thead { display: table-header-group; }
+  .cue-table tr { break-inside: avoid; }
+  @page { margin: 14mm; }
+}
