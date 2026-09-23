@@ -178,6 +178,50 @@ export function fold(allOps) {
   return { elements, conflicts };
 }
 
+// timeline-stable element order: (start, createKey), matching buildView
+export function cmpStartKey(a, b) {
+  if (a.start !== b.start) return a.start - b.start;
+  for (let i = 0; i < 3; i++) {
+    if (a.createKey[i] < b.createKey[i]) return -1;
+    if (a.createKey[i] > b.createKey[i]) return 1;
+  }
+  return 0;
+}
+
+// Read-only scene cue sheet: visible actions/sounds that START inside the
+// scene's half-open [start, start+duration) window — a cue exactly on the end
+// boundary is excluded here and belongs to the next scene. Visibility reuses
+// the folded view: deleted elements and actions whose parent scene is deleted
+// are already absent from scene.actions / sounds. Emits no operations.
+export function buildCueSheet(view, sceneId) {
+  const scene = (view.scenes || []).find((s) => s.id === sceneId);
+  if (!scene) return null;
+  const visible = [];
+  for (const s of view.scenes) for (const a of s.actions || []) visible.push(a);
+  for (const snd of view.sounds || []) visible.push(snd);
+  const end = scene.start + scene.duration;
+  const cues = visible
+    .filter((c) => c.start >= scene.start && c.start < end)
+    .sort(cmpStartKey)
+    .map((c) => ({
+      kind: c.kind,
+      id: c.id,
+      name: c.name,
+      start: c.start,
+      duration: c.duration,
+      parent: c.parent ?? null,
+      rel: c.start - scene.start,
+    }));
+  return {
+    sceneId: scene.id,
+    sceneName: scene.name,
+    start: scene.start,
+    end,
+    duration: scene.duration,
+    cues,
+  };
+}
+
 export function buildView(state) {
   const { elements, conflicts } = state;
   const scenes = [];
@@ -187,16 +231,8 @@ export function buildView(state) {
     if (elem.kind === 'scene') scenes.push(elem);
     else if (elem.kind === 'sound') sounds.push(elem);
   }
-  const byStartKey = (a, b) => {
-    if (a.start !== b.start) return a.start - b.start;
-    for (let i = 0; i < 3; i++) {
-      if (a.createKey[i] < b.createKey[i]) return -1;
-      if (a.createKey[i] > b.createKey[i]) return 1;
-    }
-    return 0;
-  };
-  scenes.sort(byStartKey);
-  sounds.sort(byStartKey);
+  scenes.sort(cmpStartKey);
+  sounds.sort(cmpStartKey);
 
   const actionsByScene = new Map();
   for (const elem of elements.values()) {
@@ -207,7 +243,7 @@ export function buildView(state) {
       actionsByScene.get(elem.parent).push(elem);
     }
   }
-  for (const acts of actionsByScene.values()) acts.sort(byStartKey);
+  for (const acts of actionsByScene.values()) acts.sort(cmpStartKey);
 
   return {
     scenes: scenes.map((s) => ({

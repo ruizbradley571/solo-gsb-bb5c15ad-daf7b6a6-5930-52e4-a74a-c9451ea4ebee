@@ -1,7 +1,7 @@
 // Quick equivalence check of static/engine.js against the Python scenarios.
 // Run: node tests/engine.node.mjs
 import assert from 'node:assert';
-import { fold, buildView, versionVector, clientSeq, snapshot, totalKey } from '../static/engine.js';
+import { fold, buildView, buildCueSheet, versionVector, clientSeq, snapshot, totalKey } from '../static/engine.js';
 
 const op = (seq, cid, type, kind, elemId, lamport, vv = {}, payload = {}, parent) => {
   const o = { opId: `${seq}@${cid}`, type, kind, elemId, lamport, clientId: cid, vv, payload };
@@ -109,4 +109,42 @@ const add = (seq, cid, kind, elem, start, name, lamport = 1, vv, parent) =>
   assert.deepEqual(v.conflicts[0].candidates.map((c) => c.value), ['A名', 'B名']);
 }
 
-console.log('JS engine: all 9 scenario groups passed');
+// 10. read-only scene cue sheet: half-open window, visibility, stable order
+{
+  const ops = [
+    op(1, 'A', 'add', 'scene', 'scA', 1, { A: 0 },
+      { name: '场次A', start: 1000, duration: 10000 }),
+    op(1, 'B', 'add', 'scene', 'scB', 1, { B: 0 },
+      { name: '场次B', start: 11000, duration: 10000 }),
+    op(1, 'K', 'add', 'scene', 'scC', 1, { K: 0 },
+      { name: '场次C', start: 50000, duration: 5000 }),
+    op(2, 'K', 'delete', 'scene', 'scC', 2, { K: 1 }),
+    add(1, 'C', 'action', 'aInA', 2000, undefined, 1, undefined, 'scA'),
+    add(1, 'F', 'action', 'aOutside', 12000, undefined, 1, undefined, 'scA'),
+    add(1, 'G', 'action', 'aOrphan', 3000, undefined, 1, undefined, 'scGhost'),
+    add(1, 'D', 'sound', 'sndInA', 5000),
+    add(1, 'E', 'sound', 'sndBoundary', 11000),
+    add(1, 'H', 'sound', 'sndDeleted', 4000),
+    op(2, 'H', 'delete', 'sound', 'sndDeleted', 2, { H: 1 }),
+    op(1, 'I', 'add', 'action', 'actTie', 3, { I: 0 },
+      { name: 'actTie', start: 5000, duration: 5000 }, 'scA'),
+    op(1, 'J', 'add', 'sound', 'sndTie', 5, { J: 0 },
+      { name: 'sndTie', start: 5000, duration: 5000 }),
+  ];
+  const view = buildView(fold(ops));
+  const a = buildCueSheet(view, 'scA');
+  assert.deepEqual(a.cues.map((c) => c.id), ['aInA', 'sndInA', 'actTie', 'sndTie']);
+  assert.equal(a.start, 1000);
+  assert.equal(a.end, 11000);
+  assert.ok(a.cues.every((c) => c.start >= 1000 && c.start < 11000));
+  assert.equal(a.cues[0].rel, 1000);
+  const b = buildCueSheet(view, 'scB');
+  assert.deepEqual(b.cues.map((c) => c.id), ['sndBoundary', 'aOutside']);
+  assert.equal(b.cues[0].rel, 0);
+  assert.equal(buildCueSheet(view, 'scC'), null);
+  assert.equal(buildCueSheet(view, 'nope'), null);
+  const shown = new Set([...a.cues, ...b.cues].map((c) => c.id));
+  assert.ok(!shown.has('sndDeleted') && !shown.has('aOrphan'));
+}
+
+console.log('JS engine: all 10 scenario groups passed');

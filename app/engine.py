@@ -245,6 +245,52 @@ def fold(all_ops: list[dict]) -> dict:
     return {"elements": elements, "conflicts": conflicts}
 
 
+def _start_key(e: dict) -> tuple:
+    return (e["start"], *e["createKey"])
+
+
+def build_cue_sheet(view: dict, scene_id: str) -> dict | None:
+    """Read-only cue sheet for one scene (pure function; emits no operations).
+
+    Returns the visible actions and sounds that *start* inside the scene's
+    half-open ``[start, start + duration)`` window, in the timeline's stable
+    ``(start, createKey)`` order.  A cue exactly on the end boundary is
+    excluded and therefore belongs to at most one scene.  Visibility reuses
+    the folded view rules: deleted elements and actions whose parent scene is
+    deleted/hidden never appear.  Each cue carries ``rel`` (start relative to
+    the scene start), ``name`` and ``duration``.
+    """
+    scene = next((s for s in view["scenes"] if s["id"] == scene_id), None)
+    if scene is None:
+        return None
+    visible: list[dict] = []
+    for s in view["scenes"]:
+        visible.extend(s.get("actions", []))
+    visible.extend(view["sounds"])
+    end = scene["start"] + scene["duration"]
+    cues = [
+        {
+            "kind": c["kind"],
+            "id": c["id"],
+            "name": c["name"],
+            "start": c["start"],
+            "duration": c["duration"],
+            "parent": c.get("parent"),
+            "rel": c["start"] - scene["start"],
+        }
+        for c in sorted(visible, key=_start_key)
+        if scene["start"] <= c["start"] < end
+    ]
+    return {
+        "sceneId": scene["id"],
+        "sceneName": scene["name"],
+        "start": scene["start"],
+        "end": end,
+        "duration": scene["duration"],
+        "cues": cues,
+    }
+
+
 def build_view(state: dict) -> dict:
     """Turn fold output into the ordered, orphan-filtered view the UI uses."""
     elements = state["elements"]
@@ -257,9 +303,8 @@ def build_view(state: dict) -> dict:
         elif elem["kind"] == "sound":
             sounds.append(elem)
 
-    scenes.sort(key=lambda e: (e["start"], e["createKey"][0:2]
-                               + [e["createKey"][2]]))
-    sounds.sort(key=lambda e: (e["start"], e["createKey"]))
+    scenes.sort(key=_start_key)
+    sounds.sort(key=_start_key)
 
     actions_by_scene: dict[str, list] = {}
     for elem in elements.values():
@@ -269,7 +314,7 @@ def build_view(state: dict) -> dict:
         if parent in elements and not elements[parent]["deleted"]:
             actions_by_scene.setdefault(parent, []).append(elem)
     for acts in actions_by_scene.values():
-        acts.sort(key=lambda e: (e["start"], e["createKey"]))
+        acts.sort(key=_start_key)
 
     return {
         "scenes": [

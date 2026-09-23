@@ -2,7 +2,7 @@
 // 剧场排练时序编排 — 前端客户端
 // 操作日志 + Lamport 时钟；断线写本地队列，重连按版本向量合并
 // ============================================================================
-import { fold, buildView, versionVector, clientSeq, totalKey, cmpKey } from './engine.js';
+import { fold, buildView, buildCueSheet, versionVector, clientSeq, totalKey, cmpKey } from './engine.js';
 
 const SNAP_MS = 250;                       // 拖拽吸附粒度
 const PX_PER_MS = 0.024;                   // 24px / 秒
@@ -72,6 +72,7 @@ const state = {
   retryTimer: null,
   closing: false,
   selectedId: null,
+  cueSceneId: null,        // 只读提示单当前场次（本地视图状态，不产生操作）
   dragging: null,          // {id, origStart, origX, width}
   suppressDetail: false,
 };
@@ -445,6 +446,7 @@ function render() {
     !!(v.scenes.length || v.sounds.length));
 
   renderDetail();
+  renderCue();
   renderConflicts();
   renderLog();
 }
@@ -524,6 +526,7 @@ function renderDetail() {
 
   $('#btn-delete').classList.toggle('hidden', !!elem.deleted);
   $('#btn-restore').classList.toggle('hidden', !elem.deleted);
+  $('#btn-view-cue').classList.toggle('hidden', elem.kind !== 'scene' || !!elem.deleted);
   state.suppressDetail = false;
 }
 
@@ -551,6 +554,172 @@ function bindDetail() {
   $('#btn-delete').addEventListener('click', () => removeElement(state.selectedId));
   $('#btn-restore').addEventListener('click', () => restoreElement(state.selectedId));
 }
+
+// ------------------------------------------------- read-only cue sheet ----
+// 复用 fold 视图的可见性规则（删除过滤、父场次隐藏）；本模块只读取 state.view，
+// 选择场次 / 点击提示 / 打印都不会发出任何协作操作。
+function effectiveCueSceneId() {
+  const scenes = state.view.scenes;
+  if (!scenes.length) return null;
+  if (scenes.some((s) => s.id === state.cueSceneId)) return state.cueSceneId;
+  const sel = state.view.elements[state.selectedId];
+  if (sel && sel.kind === 'scene' && !sel.deleted && scenes.some((s) => s.id === sel.id))
+    return sel.id;
+  return scenes[0].id;
+}
+
+function cueRangeText(sheet) {
+  return `${fmtTime(sheet.start)} – ${fmtTime(sheet.end)}（半开区间，时长 ${fmtTime(sheet.duration)}）`;
+}
+
+// 屏幕与打印共用的表格；data-id 行可在屏幕侧点击定位元素
+function buildCueTable(sheet, { clickable } = {}) {
+  const table = document.createElement('table');
+  table.className = 'cue-table';
+  table.innerHTML = `<thead><tr>
+      <th class="c-rel">相对时间</th>
+      <th class="c-kind">类型</th>
+      <th class="c-name">名称</th>
+      <th class="c-dur">时长</th>
+    </tr></thead>`;
+  const body = document.createElement('tbody');
+  if (!sheet.cues.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="4" class="cue-empty">该场次时间范围内没有开始的动作或音效</td>';
+    body.appendChild(tr);
+  }
+  for (const cue of sheet.cues) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = cue.id;
+    tr.title = `绝对开始 ${fmtTime(cue.start)} · ${cue.kind === 'action' ? '属于「'
+      + (state.view.elements[cue.parent]?.name || shortId(cue.parent)) + '」' : '独立音效'}`;
+    tr.innerHTML = `<td class="c-rel mono">${fmtTime(cue.rel)}</td>
+      <td class="c-kind"><span class="cue-tag ${cue.kind}-tag">${KIND_LABEL[cue.kind]}</span></td>
+      <td class="c-name">${cue.name}</td>
+      <td class="c-dur mono">${fmtTime(cue.duration)}</td>`;
+    if (clickable) {
+      tr.classList.add('cue-row');
+      if (cue.id === state.selectedId) tr.classList.add('selected');
+      tr.addEventListener('click', () => {
+        state.selectedId = cue.id;           // 仅本地选中，不切换标签、不发操作
+        render();
+      });
+    }
+    body.appendChild(tr);
+  }
+  table.appendChild(body);
+  return table;
+}
+
+function renderCue() {
+  if (!state.view) return;
+  const select = $('#cue-scene');
+  const scenes = state.view.scenes;
+  const id = effectiveCueSceneId();
+  state.cueSceneId = id;
+
+  // 仅在场次列表变化时重建下拉框，避免打断选择
+  const opts = scenes.map((s) => s.id).join('|');
+  if (select.dataset.opts !== opts) {
+    select.innerHTML = '';
+    for (const s of scenes) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = `${s.name}（${fmtTime(s.start)} 起）`;
+      select.appendChild(opt);
+    }
+    select.dataset.opts = opts;
+  }
+  select.value = id || '';
+  select.disabled = !id;
+  $('#btn-cue-print').disabled = !id;
+
+  const box = $('#cue-content');
+  box.innerHTML = '';
+  if (!id) {
+    box.innerHTML = '<div class="muted small pad">还没有场次 —— 先在时间线上「＋ 场次」，再来生成提示单。</div>';
+    return;
+  }
+  const sheet = buildCueSheet(state.view, id);
+  if (!sheet) return;
+
+  const head = document.createElement('div');
+  head.className = 'cue-head pad';
+  head.innerHTML = `<div class="cue-title"></div>
+    <div class="cue-range small muted"></div>
+    <div class="cue-count small muted"></div>
+    <div class="cue-note small muted">只读视图：按时间线顺序列出本场次时间范围内「开始」的可见动作与音效；
+      不产生协作操作，可直接打印或另存为 PDF。</div>`;
+  head.querySelector('.cue-title').textContent = `📋 ${sheet.sceneName} · 提示单`;
+  head.querySelector('.cue-range').textContent = cueRangeText(sheet);
+  head.querySelector('.cue-count').textContent = `共 ${sheet.cues.length} 条提示`;
+  box.appendChild(head);
+  box.appendChild(buildCueTable(sheet, { clickable: true }));
+}
+
+function prepareCuePrint() {
+  const id = effectiveCueSceneId();
+  if (!id) return false;
+  const sheet = buildCueSheet(state.view, id);
+  if (!sheet) return false;
+
+  const host = $('#cue-print');
+  host.innerHTML = '';
+  const doc = document.createElement('div');
+  doc.className = 'cue-doc';
+  doc.innerHTML = `<h1></h1>
+    <h2></h2>
+    <p class="cue-doc-meta"></p>
+    <p class="cue-doc-note"></p>`;
+  doc.querySelector('h1').textContent = `场次提示单 · ${state.title || '未命名剧目'}`;
+  doc.querySelector('h2').textContent = sheet.sceneName;
+  doc.querySelector('.cue-doc-meta').textContent =
+    `时间范围：${cueRangeText(sheet)}　｜　共 ${sheet.cues.length} 条提示　｜　生成时间：${new Date().toLocaleString()}`;
+  doc.querySelector('.cue-doc-note').textContent =
+    '相对时间均自本场次起点（0:00.000）计算；仅列出在半开区间 [起点, 终点) 内开始的可见动作与音效。';
+  doc.appendChild(buildCueTable(sheet, { clickable: false }));
+  host.appendChild(doc);
+  host.classList.remove('hidden');
+  document.body.classList.add('printing');
+  return true;
+}
+
+function teardownCuePrint() {
+  document.body.classList.remove('printing');
+  const host = $('#cue-print');
+  host.classList.add('hidden');
+  host.innerHTML = '';
+}
+
+function printCueSheet() {
+  if (!prepareCuePrint()) { toast('还没有可打印的场次', true); return; }
+  // 打印对话框关闭后清理；afterprint 不触发时由定时器兜底
+  const cleanup = () => { teardownCuePrint(); window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  setTimeout(teardownCuePrint, 60000);
+  window.print();
+}
+
+function bindCue() {
+  // 原生 Ctrl+P：正停留在提示单标签时，打印只读提示单而非时间线
+  window.addEventListener('beforeprint', () => {
+    if ($('#panel-cue').classList.contains('hidden')) return;
+    prepareCuePrint();
+  });
+  window.addEventListener('afterprint', teardownCuePrint);
+  $('#tab-cue').addEventListener('click', () => switchTab('cue'));
+  $('#cue-scene').addEventListener('change', (e) => {
+    state.cueSceneId = e.target.value;   // 纯本地选择，不进入操作日志
+    renderCue();
+  });
+  $('#btn-cue-print').addEventListener('click', printCueSheet);
+  $('#btn-view-cue').addEventListener('click', () => {
+    if (state.selectedId) state.cueSceneId = state.selectedId;
+    switchTab('cue');
+    renderCue();
+  });
+}
+
 
 // ------------------------------------------------------------- conflicts ----
 function fmtField(field) {
@@ -685,13 +854,14 @@ function renderLog() {
 
 // ------------------------------------------------------------------ tabs ----
 function switchTab(name) {
-  for (const t of ['detail', 'conflict', 'log']) {
+  for (const t of ['detail', 'cue', 'conflict', 'log']) {
     $(`#tab-${t}`).classList.toggle('active', t === name);
     $(`#panel-${t}`).classList.toggle('hidden', t !== name);
   }
 }
 function bindTabs() {
   $('#tab-detail').addEventListener('click', () => switchTab('detail'));
+  $('#tab-cue').addEventListener('click', () => switchTab('cue'));
   $('#tab-conflict').addEventListener('click', () => switchTab('conflict'));
   $('#tab-log').addEventListener('click', () => switchTab('log'));
 }
@@ -772,6 +942,7 @@ function enterPlay(playId, title) {
   state.queue = LS.get(queueKey(playId), []);
   state.serverVV = {};
   state.selectedId = null;
+  state.cueSceneId = null;
   location.hash = `#/play/${playId}`;
   $('#join-overlay').classList.add('hidden');
   $('#app').classList.remove('hidden');
@@ -817,6 +988,7 @@ function bindChrome() {
   });
   bindTabs();
   bindDetail();
+  bindCue();
 }
 
 (async function init() {

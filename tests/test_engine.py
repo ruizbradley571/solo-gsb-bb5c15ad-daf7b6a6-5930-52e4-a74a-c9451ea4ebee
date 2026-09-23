@@ -1,5 +1,5 @@
 """Convergence / determinism tests for the merge engine."""
-from app.engine import build_view, client_seq, fold, snapshot, version_vector
+from app.engine import build_cue_sheet, build_view, client_seq, fold, snapshot, version_vector
 
 
 def _op(seq, cid, typ, kind, elem, lamport, vv=None, payload=None, parent=None):
@@ -149,3 +149,55 @@ def test_three_way_partial_logs_converge():
     # delete concurrent with edits -> flagged and element deleted
     assert views[0]["elements"]["s1"]["deleted"] is True
     assert any(c["kind"] == "delete" for c in views[0]["conflicts"])
+
+
+def test_cue_sheet_half_open_boundary_visibility_and_order():
+    """Cue sheet filters by start inside [start, end) reusing view visibility."""
+    ops = [
+        _op(1, "A", "add", "scene", "scA", 1, {"A": 0},
+            {"name": "场次A", "start": 1000, "duration": 10000}),
+        _op(1, "B", "add", "scene", "scB", 1, {"B": 0},
+            {"name": "场次B", "start": 11000, "duration": 10000}),
+        _op(1, "K", "add", "scene", "scC", 1, {"K": 0},
+            {"name": "场次C", "start": 50000, "duration": 5000}),
+        _op(2, "K", "delete", "scene", "scC", 2, {"K": 1}),
+        # action belonging to scA
+        _add(1, "C", "action", "aInA", 2000, parent="scA"),
+        # action under scA but starts inside scB's window
+        _add(1, "F", "action", "aOutside", 12000, parent="scA"),
+        # action whose parent scene never existed -> hidden like folded view
+        _add(1, "G", "action", "aOrphan", 3000, parent="scGhost"),
+        # sounds at various points
+        _add(1, "D", "sound", "sndInA", 5000),
+        _add(1, "E", "sound", "sndBoundary", 11000),
+        _add(1, "H", "sound", "sndDeleted", 4000),
+        _op(2, "H", "delete", "sound", "sndDeleted", 2, {"H": 1}),
+        # same-start cues ordered by createKey (lamport, clientId, seq)
+        _op(1, "I", "add", "action", "actTie", 3, {"I": 0},
+            {"name": "actTie", "start": 5000, "duration": 5000}, "scA"),
+        _op(1, "J", "add", "sound", "sndTie", 5, {"J": 0},
+            {"name": "sndTie", "start": 5000, "duration": 5000}),
+    ]
+    view = build_view(fold(ops))
+
+    sheet_a = build_cue_sheet(view, "scA")
+    assert [c["id"] for c in sheet_a["cues"]] == [
+        "aInA", "sndInA", "actTie", "sndTie",
+    ]
+    # half-open boundary: cue at exactly the end is NOT in this scene
+    assert sheet_a["start"] == 1000 and sheet_a["end"] == 11000
+    assert all(c["start"] >= 1000 and c["start"] < 11000 for c in sheet_a["cues"])
+    assert sheet_a["cues"][0]["rel"] == 1000          # relative to scene start
+    assert sheet_a["cues"][0]["kind"] == "action"
+    assert sheet_a["cues"][1]["kind"] == "sound"
+
+    sheet_b = build_cue_sheet(view, "scB")
+    assert [c["id"] for c in sheet_b["cues"]] == ["sndBoundary", "aOutside"]
+    # boundary cue lands in exactly one scene (the one starting there)
+    assert sheet_b["cues"][0]["rel"] == 0
+
+    # deleted / unknown scenes produce no sheet; deleted and orphan cues never show
+    assert build_cue_sheet(view, "scC") is None
+    assert build_cue_sheet(view, "nope") is None
+    shown = {c["id"] for s in (sheet_a, sheet_b) for c in s["cues"]}
+    assert "sndDeleted" not in shown and "aOrphan" not in shown
